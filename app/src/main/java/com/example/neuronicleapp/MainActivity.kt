@@ -1,5 +1,7 @@
 package com.example.neuronicleapp
 
+import com.github.mikephil.charting.formatter.ValueFormatter
+
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -38,7 +40,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
-
+import java.util.concurrent.TimeUnit // 시간 변환 위해 추가
 // Data class (with timestamp)
 data class EegData(val timestamp: Long, val channel1: Float, val channel2: Float)
 
@@ -65,6 +67,8 @@ class MainActivity : AppCompatActivity() {
     private var dataCount = 0
     private var isSaving = false
     private val eegDataBuffer = mutableListOf<EegData>()
+
+    private var startTimeMillis: Long = 0L // ⭐ 측정 시작 시간 저장 변수
 
     companion object {
         private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
@@ -106,19 +110,53 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupChart() {
-        eegChart.description.isEnabled = false
-        eegChart.legend.isEnabled = true
-        eegChart.xAxis.setDrawLabels(false)
-        eegChart.axisLeft.axisMaximum = 200f
-        eegChart.axisLeft.axisMinimum = -200f
+        eegChart.description.isEnabled = false // 차트 설명 비활성화
+        eegChart.legend.isEnabled = true // 범례(Legend) 활성화 (Channel 1, Channel 2 표시)
+        eegChart.legend.textColor = Color.BLACK // 범례 글자색
+
+        // --- X축 설정 ---
+        val xAxis = eegChart.xAxis
+        xAxis.textColor = Color.BLACK // X축 글자색
+        xAxis.setDrawGridLines(false) // X축 배경 격자선 비활성화
+        xAxis.setAvoidFirstLastClipping(true) // 첫/마지막 라벨 잘림 방지
+        xAxis.isEnabled = true // X축 활성화
+        xAxis.setDrawLabels(true) // X축 라벨 표시 활성화
+        xAxis.granularity = 10f // 약 10초 간격으로 라벨 표시 (조절 가능)
+
+        // X축 레이블 포맷터 설정 (경과 시간 초 -> mm:ss 형식)
+        xAxis.valueFormatter = object : ValueFormatter() {
+            override fun getFormattedValue(value: Float): String {
+                // 초 단위를 밀리초로 변환하여 mm:ss 형식으로 포맷
+                val millis = TimeUnit.SECONDS.toMillis(value.toLong())
+                return SimpleDateFormat("mm:ss", Locale.getDefault()).format(Date(millis))
+            }
+        }
+
+        // --- Y축 (왼쪽) 설정 ---
+        val leftAxis = eegChart.axisLeft
+        leftAxis.textColor = Color.BLACK // Y축 글자색
+        leftAxis.setDrawGridLines(true) // Y축 배경 격자선 활성화
+        // Y축 범위 설정 (PC 프로그램 스크린샷 기준)
+        leftAxis.axisMaximum = 250f
+        leftAxis.axisMinimum = -250f
+
+        // --- Y축 (오른쪽) 비활성화 ---
         eegChart.axisRight.isEnabled = false
 
-        val ch1DataSet = createSet("Channel 1", Color.RED)
-        val ch2DataSet = createSet("Channel 2", Color.BLUE)
+        // --- 기타 차트 설정 ---
+        eegChart.setTouchEnabled(true) // 터치 상호작용 활성화
+        eegChart.isDragEnabled = true // 드래그 활성화
+        eegChart.setScaleEnabled(true) // 확대/축소 활성화
+        eegChart.setDrawGridBackground(false) // 배경 격자 비활성화
+        eegChart.setPinchZoom(true) // 두 손가락으로 확대/축소 활성화
+        eegChart.setBackgroundColor(Color.WHITE) // 차트 배경색
 
-        eegChart.data = LineData(ch1DataSet, ch2DataSet)
+        // --- 초기 데이터셋 추가 ---
+        // 빈 데이터셋으로 초기화하여 NullPointerException 방지
+        val set1 = createSet("Channel 1", Color.RED)
+        val set2 = createSet("Channel 2", Color.BLUE)
+        eegChart.data = LineData(set1, set2) // 빈 LineData 객체 할당
     }
-
     private fun addChartEntry(data: EegData) {
         val lineData = eegChart.data
         if (lineData != null) {
@@ -251,6 +289,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun parseAndReadData(socket: BluetoothSocket): Job {
+        startTimeMillis = System.currentTimeMillis() // ⭐ 측정 시작 시간 기록
+        dataCount = 0 // ⭐ 데이터 카운트 초기화 (그래프 X축용)
+
         return lifecycleScope.launch(Dispatchers.IO) {
             val inputStream: InputStream = socket.inputStream
             val dataBuffer = mutableListOf<Byte>()
@@ -291,12 +332,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ⭐⭐⭐ 패킷을 해석하여 EEG 데이터로 변환하는 함수 ⭐⭐⭐
     private fun parsePacket(packet: ByteArray): EegData {
-        val ch1Raw = (packet[9].toInt() and 0xFF shl 8) or (packet[8].toInt() and 0xFF)
-        val ch2Raw = (packet[11].toInt() and 0xFF shl 8) or (packet[10].toInt() and 0xFF)
-        val conversionFactor = 0.40283203125f
-        val ch1uV = (ch1Raw - 8192) * conversionFactor
-        val ch2uV = (ch2Raw - 8192) * conversionFactor
+        // Little Endian으로 2바이트를 부호 있는 16비트 정수로 변환
+        // Kotlin의 Byte는 부호가 있으므로 Int 변환 시 부호 확장을 고려하여 비트 연산
+        val ch1Raw = ((packet[9].toInt() shl 8) or (packet[8].toInt() and 0xFF))
+        val ch2Raw = ((packet[11].toInt() shl 8) or (packet[10].toInt() and 0xFF))
+
+        // ⭐ [수정] 새로운 변환 계수 적용 (매뉴얼 스펙 기반 추정)
+        // 매뉴얼의 최대값 393uVp와 부호있는 16비트 최대값(32767)을 사용
+        val conversionFactor = 393.0f / 32767.0f // 약 0.01199f
+
+        // ⭐ [수정] 오프셋 제거, raw 값에 계수만 곱함
+        val ch1uV = ch1Raw * conversionFactor
+        val ch2uV = ch2Raw * conversionFactor
+
         return EegData(System.currentTimeMillis(), ch1uV, ch2uV)
     }
 
