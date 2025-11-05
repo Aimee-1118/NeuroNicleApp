@@ -52,7 +52,7 @@ class HistoryActivity : AppCompatActivity() {
         popup.setOnMenuItemClickListener { menuItem ->
             when (menuItem.itemId) {
                 R.id.open_csv -> {
-                    item.csvPath?.let { openFile(it, "text/csv") } ?: showToast("CSV 파일 없음")
+                    item.csvPath?.let { openFile(it, "text/plain") } ?: showToast("CSV 파일 없음")
                     true
                 }
                 R.id.open_png -> {
