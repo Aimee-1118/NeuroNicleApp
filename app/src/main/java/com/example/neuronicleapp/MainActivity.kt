@@ -1,7 +1,5 @@
 package com.example.neuronicleapp
 
-import com.github.mikephil.charting.formatter.ValueFormatter
-
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -31,6 +29,7 @@ import com.github.mikephil.charting.charts.LineChart
 import com.github.mikephil.charting.data.Entry
 import com.github.mikephil.charting.data.LineData
 import com.github.mikephil.charting.data.LineDataSet
+import com.github.mikephil.charting.formatter.ValueFormatter
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -47,9 +46,8 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import java.nio.charset.Charset
 
-//2025.10.18.13.55
+// 2025.10.18.13.55
 
 // Data class (with timestamp)
 data class EegData(val timestamp: Long, val channel1: Float, val channel2: Float)
@@ -80,7 +78,7 @@ class MainActivity : AppCompatActivity() {
     private var startTimeMillis: Long = 0L
     private var isMeasuring = false
     private val eegDataBuffer = mutableListOf<EegData>()
-    private var dataCountForGraph = 0 // 그래프 X축용 카운터 (경과 시간과 별개로 사용될 수 있음)
+    private var dataCountForGraph = 0 // 그래프 X축용 카운터
 
     // ⭐ 실험 정보 저장 변수
     private var subjectId: String = ""
@@ -88,7 +86,6 @@ class MainActivity : AppCompatActivity() {
     private var condition: String = ""
 
     private var currentCsvUriString: String? = null // 현재 저장된 CSV URI 저장
-
     private var currentPngUriString: String? = null // 현재 저장된 PNG URI 저장
 
     companion object {
@@ -97,9 +94,7 @@ class MainActivity : AppCompatActivity() {
         private const val PACKET_LENGTH = 36
 
         private const val PREFS_NAME = "MeasurementHistoryPrefs"
-
         private const val HISTORY_KEY = "measurementHistory"
-
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -130,7 +125,7 @@ class MainActivity : AppCompatActivity() {
 
         findButton.setOnClickListener { findPairedDevices() }
         devicesListView.setOnItemClickListener { _, _, position, _ -> connectToDevice(deviceList[position]) }
-        
+
         startMeasurementButton.setOnClickListener {
             if (bluetoothSocket == null || !bluetoothSocket!!.isConnected) {
                 Toast.makeText(this, "먼저 장치에 연결해주세요.", Toast.LENGTH_SHORT).show()
@@ -149,7 +144,7 @@ class MainActivity : AppCompatActivity() {
             val intent = Intent(this, HistoryActivity::class.java)
             startActivity(intent)
         }
-        
+
         startMeasurementButton.isEnabled = false // 초기에는 측정 시작 버튼 비활성화
         stopButton.isEnabled = false // 초기에는 중지 버튼 비활성화
     }
@@ -189,13 +184,13 @@ class MainActivity : AppCompatActivity() {
         eegChart.setDrawGridBackground(false)
         eegChart.setPinchZoom(true)
         eegChart.setBackgroundColor(Color.WHITE)
-        
+
         eegChart.setVisibleXRangeMaximum(3f) // 한 번에 최대 3초 범위만 보여줌
 
-        val set1 = createSet("Channel 1", Color.RED) 
+        val set1 = createSet("Channel 1", Color.RED)
         val set2 = createSet("Channel 2", Color.BLUE)
         eegChart.data = LineData(set1, set2)
-        eegChart.invalidate() 
+        eegChart.invalidate()
     }
 
     private fun addChartEntry(data: EegData) {
@@ -209,17 +204,17 @@ class MainActivity : AppCompatActivity() {
 
                 lineData.addEntry(Entry(elapsedTimeSeconds, data.channel1), 0)
                 lineData.addEntry(Entry(elapsedTimeSeconds, data.channel2), 1)
-                
+
                 lineData.notifyDataChanged()
                 eegChart.notifyDataSetChanged()
-                
+
                 // 데이터가 너무 많아지는 것을 방지하여 성능 유지 (약 3초 분량, 250Hz 기준)
-                val maxEntries = 750 
+                val maxEntries = 750
                 if (set1.entryCount > maxEntries) {
                     set1.removeFirst() // 가장 오래된 데이터 제거
                     set2.removeFirst()
                 }
-                
+
                 eegChart.setVisibleXRangeMaximum(3f)
                 eegChart.moveViewToX(lineData.xMax) // 가장 최신 데이터로 스크롤
             }
@@ -238,20 +233,20 @@ class MainActivity : AppCompatActivity() {
     private fun startMeasurement() {
         isMeasuring = true
         eegDataBuffer.clear()
-        
+
         startMeasurementButton.isEnabled = false
         stopButton.isEnabled = true
 
         Toast.makeText(this, "측정을 시작합니다.", Toast.LENGTH_SHORT).show()
-        
-        dataReadingJob?.cancel() 
+
+        dataReadingJob?.cancel()
         dataReadingJob = parseAndReadData(bluetoothSocket!!)
     }
 
     private fun stopMeasurementAndAskToSave() {
         isMeasuring = false
         dataReadingJob?.cancel()
-        
+
         startMeasurementButton.isEnabled = true
         stopButton.isEnabled = false
 
@@ -301,20 +296,35 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // ⭐ 1. 파이썬 분석 호환: 조건(Condition)을 숫자 코드로 변환
+        // church -> 1, market -> 2 (대소문자 무시)
+        val stimCode = when (condition.lowercase(Locale.getDefault()).trim()) {
+            "church" -> 1
+            "market" -> 2
+            else -> 0
+        }
+
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val fileName = "EEG_DATA_${subjectId}_$timestamp.csv"
+
+        // 파일명에 condition 추가 (관리 용이성)
+        val fileName = "EEG_${subjectId}_${condition}_$timestamp.csv"
         val content = StringBuilder()
 
         content.append("# Subject ID: $subjectId\n")
         content.append("# Location: $location\n")
-        content.append("# Condition: $condition\n")
+        content.append("# Condition: $condition (Code: $stimCode)\n")
         content.append("# Start Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(startTimeMillis))}\n")
-        content.append("ElapsedSeconds,Channel1,Channel2\n")
+
+        // ⭐ 2. 파이썬 분석 호환: 헤더 수정 (m1_load.py 호환)
+        // 기존: ElapsedSeconds,Channel1,Channel2
+        // 변경: time,Fp1,Fp2,stim
+        content.append("time,Fp1,Fp2,stim\n")
 
         synchronized(eegDataBuffer) {
             eegDataBuffer.forEach { data ->
                 val elapsedTimeSeconds = (data.timestamp - startTimeMillis) / 1000f
-                content.append("${String.format(Locale.US, "%.3f", elapsedTimeSeconds)},${data.channel1},${data.channel2}\n")
+                // ⭐ 3. 파이썬 분석 호환: 마지막 열에 stimCode 추가
+                content.append("${String.format(Locale.US, "%.3f", elapsedTimeSeconds)},${data.channel1},${data.channel2},$stimCode\n")
             }
         }
 
@@ -330,13 +340,13 @@ class MainActivity : AppCompatActivity() {
             uri?.let { fileUri ->
                 contentResolver.openOutputStream(fileUri)?.use { stream ->
                     stream.write(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())) // UTF-8 BOM
-                    OutputStreamWriter(stream, "UTF-8").apply { 
+                    OutputStreamWriter(stream, "UTF-8").apply {
                         write(content.toString())
                         flush()
                     }
                 }
                 currentCsvUriString = fileUri.toString()
-                Toast.makeText(this, "CSV 저장 완료", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "CSV 저장 완료: $fileName", Toast.LENGTH_SHORT).show()
 
                 if (currentPngUriString != null) {
                     saveHistoryItem(HistoryItem(System.currentTimeMillis(), subjectId, currentCsvUriString, currentPngUriString))
@@ -476,7 +486,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: IOException) {
-                    withContext(Dispatchers.Main) { 
+                    withContext(Dispatchers.Main) {
                         Toast.makeText(this@MainActivity, "Connection lost.", Toast.LENGTH_LONG).show()
                         startMeasurementButton.isEnabled = true
                         stopButton.isEnabled = false
@@ -515,7 +525,7 @@ class MainActivity : AppCompatActivity() {
         val ch1Raw = ((packet[9].toInt() shl 8) or (packet[8].toInt() and 0xFF))
         val ch2Raw = ((packet[11].toInt() shl 8) or (packet[10].toInt() and 0xFF))
 
-        val conversionFactor = 0.01199f
+       val conversionFactor = 0.01199f
 
         val ch1uV = ch1Raw * conversionFactor
         val ch2uV = ch2Raw * conversionFactor
